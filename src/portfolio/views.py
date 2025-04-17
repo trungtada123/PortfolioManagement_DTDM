@@ -14,6 +14,13 @@ import json
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from .utils import get_ai_response
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from fcm_django.models import FCMDevice
+from django.core.mail import send_mail
+import os
+from django.contrib.auth import get_user_model
+from portfolio.models import PortfolioAsset
 
 def home(request):
     return render(request, 'portfolio/home.html')
@@ -390,3 +397,116 @@ def ai_chat_api(request):
             'success': False,
             'error': str(e)
         }, status=500)
+        
+# ===== FCM token view =====
+@login_required
+@csrf_exempt
+def save_fcm_token(request):
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        fcm_token = data.get('fcm_token')
+        
+        if fcm_token:
+            # lưu hoặc cập nhật FCM token cho user
+            FCMDevice.objects.update_or_create(
+                user=request.user,
+                defaults={
+                    'registration_id': fcm_token,
+                    'type': 'web',
+                }
+            )
+            return JsonResponse({'status': 'success', 'message': 'FCM token saved'})
+        return JsonResponse({'status': 'error', 'message': 'FCM token not provided'}, status=400)
+    return JsonResponse({'status': 'error', 'message': 'Invalid request method'}, status=400)
+
+User = get_user_model()
+
+def send_stock_ceiling_floor_alert(user, symbol, current_price, exchange, alert_type):
+    """
+    Gửi thông báo đẩy và email khi cổ phiếu chạm trần/sàn.
+    
+    Args:
+        user: Người dùng nhận thông báo
+        symbol: Mã cổ phiếu
+        current_price: Giá hiện tại của cổ phiếu
+        exchange: Sàn giao dịch (HOSE, HNX, UPCoM)
+        alert_type: Loại cảnh báo ("ceiling" hoặc "floor")
+    """
+    # Xác định loại cảnh báo
+    alert_message = (
+        f"Cổ phiếu {symbol} đã chạm {'trần' if alert_type == 'ceiling' else 'sàn'}! "
+        f"Giá hiện tại: {current_price} VNĐ"
+    )
+
+    # 1. Gửi push notification qua FCM
+    devices = FCMDevice.objects.filter(user=user, active=True)
+    devices.send_message(
+        title=f"Cảnh báo cổ phiếu - {symbol}",
+        body=alert_message,
+        data={
+            "symbol": symbol,
+            "price": str(current_price),
+            "alert_type": alert_type
+        }
+    )
+
+    # 2. Gửi email qua AWS SES
+    email_subject = f"Cảnh báo cổ phiếu - {symbol}"
+    email_body = f"""Kính gửi {user.username},
+
+Cổ phiếu {symbol} trong danh mục của bạn đã chạm {'trần' if alert_type == 'ceiling' else 'sàn'}!
+- Giá hiện tại: {current_price} VNĐ
+- Sàn giao dịch: {exchange}
+
+Vui lòng kiểm tra và đưa ra quyết định đầu tư phù hợp.
+
+Trân trọng,
+StockPortfolio Team
+"""
+    send_mail(
+        subject=email_subject,
+        message=email_body,
+        from_email=os.getenv("DEFAULT_FROM_EMAIL"),
+        recipient_list=[user.email],
+        fail_silently=False,
+    )
+
+def check_and_notify_stock_alert():
+    """
+    Hàm giả lập kiểm tra cổ phiếu chạm trần/sàn và gửi thông báo.
+    Khi có dữ liệu giá, bạn có thể thay thế logic này.
+    """
+    # Giả lập dữ liệu giá cổ phiếu (sẽ thay thế khi có dữ liệu thực tế)
+    mock_stock_data = [
+        {"symbol": "VNM", "current_price": 120590, "ref_price": 112000, "exchange": "HOSE"},
+        {"symbol": "FPT", "current_price": 80000, "ref_price": 90000, "exchange": "HOSE"},
+    ]
+
+    for stock in mock_stock_data:
+        symbol = stock["symbol"]
+        current_price = stock["current_price"]
+        ref_price = stock["ref_price"]
+        exchange = stock["exchange"]
+
+        # Xác định biên độ dựa trên sàn giao dịch
+        amplitude = 0.07 if exchange == "HOSE" else 0.10 if exchange == "HNX" else 0.15
+        ceiling_price = ref_price * (1 + amplitude)
+        floor_price = ref_price * (1 - amplitude)
+
+        # Kiểm tra trần/sàn
+        alert_type = None
+        if current_price >= ceiling_price:
+            alert_type = "ceiling"
+        elif current_price <= floor_price:
+            alert_type = "floor"
+
+        if alert_type:
+            # Tìm tất cả user sở hữu cổ phiếu này
+            portfolio_assets = PortfolioAsset.objects.filter(
+                asset__symbol=symbol,
+                quantity__gt=0
+            ).select_related('portfolio__user')
+
+            for pa in portfolio_assets:
+                user = pa.portfolio.user
+                send_stock_ceiling_floor_alert(user, symbol, current_price, exchange, alert_type)

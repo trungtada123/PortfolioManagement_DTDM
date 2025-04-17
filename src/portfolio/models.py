@@ -304,3 +304,18 @@ class WalletTransaction(models.Model):
             self.wallet.save()
             
         super().save(*args, **kwargs)
+        
+# ===== FCM token modal =====
+class FCMToken (models.Model):
+    user  = models.ForeignKey(User, on_delete=models.CASCADE, related_name='fcm_tokens')
+    fcm_token = models.CharField(max_length=255, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'fcm_tokens'
+        
+    def __str__(self):
+        return f"{self.user.username} - {self.fcm_token}"
+
+       

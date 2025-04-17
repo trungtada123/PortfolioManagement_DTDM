@@ -362,6 +362,52 @@
     
     {% block extra_css %}{% endblock %}
 </head>
+<!-- ===== Thêm firebase SDK ===== -->
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-messaging-compat.js"></script>
+<script>
+    // kiểm tra nếu người dùng đã dăng nhập
+    {% if user.is_authenticated %}
+     // khởi tạo firebase
+    const firebaseConfig = {{ firebase_config|safe }};
+    const app = firebase.initializeApp(firebaseConfig);
+    const messaging = firebase.messaging();
+    // yêu cầu quyền thông báo và lấy FCM token
+    Notification.requestPermission().then((permission) => {
+        if (permission === 'granted'){
+            console.log('Notification permission granted');
+            messaging.getToken({vapidKey: '{{ vapid_key }}'}).then((token) => {
+                if (token){
+                    console.log('FCM Token:', token);
+                    // gửi token này lên server
+                    saveToken(token);
+                } else {
+                    console.log('No registration token available');
+                }
+            }).catch((err) => {
+                console.log('Error getting token:', err);
+            });
+        } else {
+            console.log('Notification permission denied');
+        }
+    });
+    // hàm gửi token lên server
+    function saveToken(token){
+        fetch ('/portfolio/save-fcm-token/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': '{{ csrf_token }}'
+            },
+            body: JSON.stringify({ fcm_token: token })
+        })
+        .then (response => response.json())
+        .then (data => console.log(data))
+        .catch (err => console.error('Error saving token:', err));
+    }
+    {% endif %}
+    
+</script>
 <body>
     <!-- Navbar -->
     <nav class="navbar navbar-expand-lg navbar-light bg-white py-3 sticky-top">

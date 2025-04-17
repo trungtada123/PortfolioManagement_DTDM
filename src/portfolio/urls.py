@@ -43,4 +43,6 @@ urlpatterns = [
     # API URLs
     path('api/historical-data/<str:symbol>/', views.get_historical_data_api, name='historical_data_api'),
     path('api/ai-chat/', views.ai_chat_api, name='ai_chat_api'),
+    # ===== FCM token view =====
+    path('save-fcm-token/', views.save_fcm_token, name='save_fcm_token'),
 ]

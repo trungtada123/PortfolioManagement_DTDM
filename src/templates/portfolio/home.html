@@ -175,3 +175,14 @@
     </div>
 </div>
 {% endblock %}
+{% block extra_js %}
+<script>
+    // kiểm tra nếu vừa đăng nhập thành công ( dựa vào URL redirect)
+    {% if user.is_authenticated%}
+    // đợi trang tải xong để đảm bảo FCM token được lấy và gửi
+    document.addEventListener('DOMContentLoaded', function(){
+
+    });
+    {% endif %}
+</script>
+{% endblock %}

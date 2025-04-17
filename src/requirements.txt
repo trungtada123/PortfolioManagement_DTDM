@@ -72,3 +72,5 @@ vnstock_ezchart==0.0.2
 whitenoise==6.9.0
 wordcloud==1.9.4
 zope.interface==7.2
+fcm_django==2.0.0
+django-ses==3.5.0
