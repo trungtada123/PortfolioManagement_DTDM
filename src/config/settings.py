@@ -1,11 +1,14 @@
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = 'django-insecure-default-key-for-development'
+SECRET_KEY = os.getenv('SECRET_KEY')
 
-DEBUG = True
+DEBUG = os.getenv('DEBUG')
 
 ALLOWED_HOSTS = ['127.0.0.1', 'localhost']
 
@@ -20,6 +23,7 @@ INSTALLED_APPS = [
     'crispy_bootstrap5',
     'portfolio',
     'django.contrib.humanize',
+    'fcm_django',
 ]
 
 MIDDLEWARE = [
@@ -45,6 +49,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                'config.context_processors.firebase_config',
             ],
         },
     },
@@ -92,3 +97,20 @@ LOGIN_REDIRECT_URL = 'dashboard'
 LOGOUT_REDIRECT_URL = 'home'
 
 AUTH_USER_MODEL = 'portfolio.User'
+
+#đường dẫn tới file Service Account Key
+FIREBASE_CREDENTIALS_PATH = os.getenv('FIREBASE_CREDENTIALS_PATH', 'src/stock-portfolio-74c6b-firebase-adminsdk-fbsvc-31424e6d39.json')
+# cấu hình fcmdjango
+FCM_DJANGO_SETTINGS = {
+    'APP_VERBOSE_NAME': 'Stock Portfolio',
+    'ONE_DEVICE_PER_USER': True,
+    'DELETE_INACTIVE_DEVICES': True,
+    'CREDENTIALS': FIREBASE_CREDENTIALS_PATH,
+}
+
+# cấu hình ses 
+# EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+# AWS_SES_ACCESS_KEY_ID = os.getenv('AWS_SES_ACCESS_KEY_ID')
+# AWS_SES_SECRET_ACCESS_KEY = os.getenv('AWS_SES_SECRET_ACCESS_KEY')
+# AWS_SES_REGION_NAME = os.getenv('AWS_SES_REGION_NAME')
+# DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL')
