@@ -2,7 +2,7 @@
 {% load static %}
 {% load crispy_forms_tags %}
 
-{% block title %}{{ title }} | {{ block.super }}{% endblock %}
+{% block title %}{% if form.instance.pk %}Cập nhật{% else %}Thêm{% endif %} tài khoản ngân hàng | {{ block.super }}{% endblock %}
 
 {% block extra_js %}
 <script src="{% static 'portfolio/js/wallet.js' %}"></script>

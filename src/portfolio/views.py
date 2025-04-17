@@ -5,8 +5,8 @@ from django.core.paginator import Paginator
 from django.db.models import Q
 from django.utils import timezone
 from .models import Portfolio, Asset, Transaction, PortfolioAsset
-from .forms import PortfolioForm, AssetForm, TransactionForm, UserRegistrationForm
-from django.contrib.auth import login
+from .forms import PortfolioForm, AssetForm, TransactionForm
+from django.contrib.auth import login, logout
 from decimal import Decimal
 from django.http import JsonResponse
 from .vnstock_services import get_price_board, get_historical_data
@@ -14,9 +14,33 @@ import json
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from .utils import get_ai_response
+from social_django.utils import load_strategy
+from urllib.parse import quote_plus
+from django.conf import settings
 
 def home(request):
     return render(request, 'portfolio/home.html')
+
+def auth0_login(request):
+    auth0_domain = settings.SOCIAL_AUTH_AUTH0_DOMAIN
+    client_id = settings.SOCIAL_AUTH_AUTH0_KEY
+    redirect_uri = request.build_absolute_uri('/complete/auth0/')
+    return redirect(f'https://{auth0_domain}/authorize?'
+                   f'response_type=code&'
+                   f'client_id={client_id}&'
+                   f'redirect_uri={quote_plus(redirect_uri)}&'
+                   f'scope=openid profile email')
+
+def auth0_logout(request):
+    auth0_domain = settings.SOCIAL_AUTH_AUTH0_DOMAIN
+    client_id = settings.SOCIAL_AUTH_AUTH0_KEY
+    return_to = request.build_absolute_uri('/')
+    
+    logout(request)
+    
+    return redirect(f'https://{auth0_domain}/v2/logout?'
+                   f'client_id={client_id}&'
+                   f'returnTo={quote_plus(return_to)}')
 
 @login_required
 def dashboard(request):
@@ -301,18 +325,6 @@ def portfolio_transactions(request, portfolio_id):
         'portfolio': portfolio,
         'transactions': transactions
     })
-
-def register(request):
-    if request.method == 'POST':
-        form = UserRegistrationForm(request.POST)
-        if form.is_valid():
-            user = form.save()
-            login(request, user)
-            messages.success(request, 'Đăng ký thành công!')
-            return redirect('dashboard')
-    else:
-        form = UserRegistrationForm()
-    return render(request, 'portfolio/register.html', {'form': form})
 
 # ============ MARKET =======
 @login_required

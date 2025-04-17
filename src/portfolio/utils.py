@@ -47,4 +47,10 @@ def get_ai_response(message):
             return f"Đã xảy ra lỗi khi kết nối với API: {response.status_code}"
     
     except Exception as e:
-        return f"Đã xảy ra lỗi: {str(e)}" 
+        return f"Đã xảy ra lỗi: {str(e)}"
+
+def auth0_settings(request):
+    return {
+        'auth0_domain': settings.SOCIAL_AUTH_AUTH0_DOMAIN,
+        'auth0_client_id': settings.SOCIAL_AUTH_AUTH0_KEY,
+    }

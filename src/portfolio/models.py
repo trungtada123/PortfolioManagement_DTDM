@@ -2,6 +2,27 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 from decimal import Decimal
 from django.utils import timezone
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from social_django.models import UserSocialAuth
+
+@receiver(post_save, sender=UserSocialAuth)
+def update_user_from_auth0(sender, instance, created, **kwargs):
+    if instance.provider == 'auth0':
+        user = instance.user
+        extra_data = instance.extra_data
+        
+        # Update user information from Auth0 profile
+        if 'name' in extra_data:
+            name_parts = extra_data['name'].split(' ', 1)
+            user.first_name = name_parts[0]
+            if len(name_parts) > 1:
+                user.last_name = name_parts[1]
+        
+        if 'email' in extra_data and extra_data['email']:
+            user.email = extra_data['email']
+        
+        user.save()
 
 class User(AbstractUser):
     phone = models.CharField(max_length=15, blank=True)

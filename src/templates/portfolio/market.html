@@ -4,10 +4,10 @@
 <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
 {% load humanize %}
 
-{% block title %}Thị trường - Portfolio Management{% endblock %}
+{% block title %}Thị trường | {{ block.super }}{% endblock %}
 
 {% block extra_css %}
-<link rel="stylesheet" href="{% static 'userLogin/css/market.css' %}">
+<link rel="stylesheet" href="{% static 'portfolio/css/market.css' %}">
 {% endblock %}
 
 {% block content %}
@@ -262,4 +262,4 @@
         }
     });
 </script>
-{% endblock %} 
+{% endblock %}

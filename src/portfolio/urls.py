@@ -2,11 +2,15 @@ from django.urls import path
 from django.contrib.auth import views as auth_views
 from . import views
 from . import views_wallet
-import portfolio.views
 
 urlpatterns = [
     path('', views.home, name='home'),
     path('dashboard/', views.dashboard, name='dashboard'),
+    
+    # Auth URLs
+    path('login/', views.auth0_login, name='login'),
+    path('logout/', views.auth0_logout, name='logout'),
+    
     path('portfolios/', views.portfolio_list, name='portfolio_list'),
     path('portfolios/create/', views.portfolio_create, name='portfolio_create'),
     path('portfolios/<int:pk>/', views.portfolio_detail, name='portfolio_detail'),
@@ -23,9 +27,6 @@ urlpatterns = [
     path('transactions/', views.transaction_list, name='transaction_list'),
     path('transactions/create/', views.transaction_create, name='transaction_create'),
     
-    path('register/', views.register, name='register'),
-    path('login/', auth_views.LoginView.as_view(template_name='portfolio/login.html'), name='login'),
-    path('logout/', auth_views.LogoutView.as_view(), name='logout'),
     path('market/', views.market, name='market'),
     path('api/historical-data/<str:symbol>/', views.get_stock_historical_data, name='get_stock_historical_data'),
     
