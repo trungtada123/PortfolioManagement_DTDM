@@ -1,20 +1,33 @@
-FROM python:3.11-slim
+# 1. Sử dụng image base
+FROM python:3.11-slim-bullseye
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+# 2. Thiết lập biến môi trường để tối ưu hóa Python
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
 
+# 3. Thư mục làm việc tại /app
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    libpq-dev gcc netcat-openbsd postgresql-client && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
+# 4. Copy file requirements và cài dependencies
 COPY requirements.txt .
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-COPY ./src /app/src
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN apt-get update && \
+apt-get install -y postgresql-client && \
+apt-get clean && \
+rm -rf /var/lib/apt/lists/*
 
-ENTRYPOINT ["/entrypoint.sh"]
+# 5. Copy mã nguồn vào /app
+COPY . .
+
+# 6. Làm cho entrypoint.sh có quyền thực thi
+RUN chmod +x ./entrypoint.sh
+
+
+# 7. Sử dụng entrypoint.sh
+ENTRYPOINT ["./entrypoint.sh"]
+
+# 8. Chạy server
+CMD ["gunicorn", "--chdir", "/app/src", "config.wsgi:application", "--bind", "0.0.0.0:8000"]

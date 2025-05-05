@@ -4,16 +4,36 @@ from django.contrib import messages
 from django.core.paginator import Paginator
 from django.db.models import Q
 from django.utils import timezone
-from .models import Portfolio, Asset, Transaction, PortfolioAsset
-from .forms import PortfolioForm, AssetForm, TransactionForm, UserRegistrationForm
-from django.contrib.auth import login
+from .models import Portfolio, Asset, Transaction, PortfolioAsset, User, Wallet
+from .forms import PortfolioForm, AssetForm, TransactionForm, UserRegistrationForm, UserProfileForm
+from django.contrib.auth import login, logout, authenticate
 from decimal import Decimal
 from django.http import JsonResponse
-from .vnstock_services import get_price_board, get_historical_data
-import json
+from .vnstock_services import get_price_board, get_historical_data, sync_vnstock_to_assets, fetch_stock_prices_snapshot
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
-from .utils import get_ai_response
+from .utils import get_ai_response, get_auth0_user_profile
+from django.urls import reverse
+from urllib.parse import quote_plus, urlencode
+import os
+# from authlib.integrations.django_client import OAuth  # Comment out this import
+from django.conf import settings
+from vnstock import Vnstock
+import json
+import pandas as pd
+import random
+
+# Comment out OAuth setup temporarily
+"""
+oauth = OAuth()
+oauth.register(
+    "auth0",
+    client_id=settings.AUTH0_CLIENT_ID,
+    client_secret=settings.AUTH0_CLIENT_SECRET,
+    client_kwargs={"scope": "openid profile email"},
+    server_metadata_url=f"https://{settings.AUTH0_DOMAIN}/.well-known/openid-configuration",
+)
+"""
 
 def home(request):
     return render(request, 'portfolio/home.html')
@@ -38,6 +58,9 @@ def dashboard(request):
     recent_transactions = Transaction.objects.filter(
         portfolio__user=request.user
     ).order_by('-transaction_date')[:5]
+    
+    # Get wallet for displaying balance on dashboard
+    wallet, created = Wallet.objects.get_or_create(user=request.user)
 
     context = {
         'portfolios': portfolios,
@@ -46,6 +69,7 @@ def dashboard(request):
         'total_assets': total_assets,
         'monthly_transactions': monthly_transactions,
         'recent_transactions': recent_transactions,
+        'wallet': wallet,
     }
     return render(request, 'portfolio/dashboard.html', context)
 
@@ -133,8 +157,137 @@ def portfolio_update(request, pk):
 
 @login_required
 def asset_list(request):
-    assets = Asset.objects.all()
-    return render(request, 'portfolio/asset_list.html', {'assets': assets})
+    # Get portfolio assets that user actually owns (quantity > 0)
+    portfolio_assets = PortfolioAsset.objects.filter(
+        portfolio__user=request.user,
+        quantity__gt=0
+    ).select_related('asset')
+    
+    # Get unique assets from portfolio assets
+    owned_asset_ids = portfolio_assets.values_list('asset_id', flat=True).distinct()
+    owned_assets = Asset.objects.filter(id__in=owned_asset_ids)
+    
+    # Calculate total values and add portfolio-related attributes to each asset
+    assets_with_data = []
+    
+    for asset in owned_assets:
+        # Get portfolio asset data for this asset across all portfolios
+        asset_portfolio_items = portfolio_assets.filter(asset=asset)
+        
+        # Sum quantities and calculate weighted average price
+        total_quantity = sum(pa.quantity for pa in asset_portfolio_items)
+        total_cost = sum(pa.quantity * pa.average_price for pa in asset_portfolio_items)
+        average_price = total_cost / total_quantity if total_quantity > 0 else 0
+        
+        # Calculate current value and profit/loss
+        current_value = total_quantity * asset.current_price
+        profit_loss = current_value - total_cost
+        profit_loss_percent = (profit_loss / total_cost * 100) if total_cost > 0 else 0
+        
+        # Add data to asset
+        asset.quantity = total_quantity
+        asset.average_price = average_price
+        asset.total_value = current_value
+        asset.profit_loss = profit_loss
+        asset.profit_loss_percent = profit_loss_percent
+        
+        assets_with_data.append(asset)
+    
+    # Calculate portfolio totals
+    total_investment = sum(asset.quantity * asset.average_price for asset in assets_with_data)
+    total_current_value = sum(asset.quantity * asset.current_price for asset in assets_with_data)
+    print(f"DEBUG: Total investment: {total_investment}, Total current value: {total_current_value}")
+    total_profit_loss = total_current_value - total_investment
+    total_profit_loss_percent = (total_profit_loss / total_investment * 100) if total_investment > 0 else 0
+    
+    # Fetch stock data for debug table
+    try:
+        # Initialize VNStock instance
+        vnstock_instance = Vnstock()
+        stock = vnstock_instance.stock(symbol='VN30', source='VCI')
+        
+        # Get stock list and price board
+        all_symbols_df = stock.listing.all_symbols()
+        symbols_list = all_symbols_df['ticker'].tolist()[:5]  # Get first 5 stocks
+        price_board = stock.trading.price_board(symbols_list=symbols_list)
+        
+        # Convert to list of dictionaries for template
+        debug_stocks = []
+        for symbol in symbols_list:
+            try:
+                symbol_info = all_symbols_df[all_symbols_df['ticker'] == symbol].iloc[0]
+                price_info = price_board[price_board['listing_symbol'] == symbol].iloc[0]
+                
+                # Extract needed info
+                stock_data = {
+                    'ticker': symbol,
+                    'organ_name': symbol_info['organ_name'],
+                    'price': price_info['match_match_price'] if 'match_match_price' in price_info else None,
+                    'change': price_info['match_change_percent'] if 'match_change_percent' in price_info else None,
+                    'volume': price_info['match_match_qtty'] if 'match_match_qtty' in price_info else None
+                }
+                debug_stocks.append(stock_data)
+            except (IndexError, KeyError):
+                continue
+    except Exception as e:
+        # Provide mock data for debug stocks if API fails
+        debug_stocks = [
+            {
+                'ticker': 'VNM',
+                'organ_name': 'Công ty Cổ phần Sữa Việt Nam',
+                'price': 75000,
+                'change': 2.5,
+                'volume': 1250000
+            },
+            {
+                'ticker': 'FPT',
+                'organ_name': 'Công ty Cổ phần FPT',
+                'price': 92300,
+                'change': 1.8,
+                'volume': 980500
+            },
+            {
+                'ticker': 'VIC',
+                'organ_name': 'Tập đoàn Vingroup',
+                'price': 48600,
+                'change': -1.2,
+                'volume': 1432000
+            },
+            {
+                'ticker': 'VHM',
+                'organ_name': 'Công ty Cổ phần Vinhomes',
+                'price': 45800,
+                'change': -0.7,
+                'volume': 875000
+            },
+            {
+                'ticker': 'MSN',
+                'organ_name': 'Tập đoàn Masan',
+                'price': 82500,
+                'change': 3.2,
+                'volume': 654300
+            }
+        ]
+        print(f"Using mock data for debug stocks. Error was: {e}")
+    
+    # Get asset types for filter
+    asset_types = Asset.ASSET_TYPES
+    
+    # Get unique sectors for filter
+    sectors = Asset.objects.values_list('sector', flat=True).distinct()
+    
+    context = {
+        'assets': assets_with_data,
+        'debug_stocks': debug_stocks,
+        'asset_types': asset_types,
+        'sectors': sectors,
+        'total_investment': total_investment,
+        'total_current_value': total_current_value,
+        'total_profit_loss': total_profit_loss,
+        'total_profit_loss_percent': total_profit_loss_percent
+    }
+    
+    return render(request, 'portfolio/asset_list.html', context)
 
 @login_required
 def asset_create(request):
@@ -224,73 +377,170 @@ def transaction_create(request):
 def buy_stock(request, portfolio_id):
     portfolio = get_object_or_404(Portfolio, pk=portfolio_id, user=request.user)
     
+    # Get all assets for the autocomplete feature
+    all_assets = Asset.objects.all()
+    
     if request.method == 'POST':
-        form = TransactionForm(request.POST)
-        if form.is_valid():
-            transaction = form.save(commit=False)
-            transaction.portfolio = portfolio
-            transaction.transaction_type = 'buy'
-            transaction.transaction_date = timezone.now()
-            transaction.save()
+        # Get symbol and convert to asset
+        symbol = request.POST.get('symbol')
+        
+        try:
+            # Find asset by symbol
+            asset = Asset.objects.get(symbol=symbol)
             
-            messages.success(request, 'Giao dịch mua đã được thực hiện thành công!')
-            return redirect('portfolio_detail', pk=portfolio_id)
+            # Build form data with the asset included
+            form_data = request.POST.copy()
+            form_data['asset'] = asset.id  # Set the asset ID in the form data
+            
+            form = TransactionForm(form_data, initial={'portfolio': portfolio, 'transaction_type': 'buy'})
+            
+            if form.is_valid():
+                transaction = form.save(commit=False)
+                transaction.portfolio = portfolio
+                transaction.transaction_type = 'buy'
+                transaction.transaction_date = timezone.now()
+                transaction.save()
+                
+                messages.success(request, 'Giao dịch mua đã được thực hiện thành công!')
+                return redirect('portfolio_detail', pk=portfolio_id)
+            else:
+                messages.error(request, f"Lỗi khi xử lý giao dịch: {form.errors}")
+        except Asset.DoesNotExist:
+            messages.error(request, f"Không tìm thấy cổ phiếu với mã {symbol}")
+            form = TransactionForm(initial={
+                'portfolio': portfolio,
+                'transaction_type': 'buy',
+                'transaction_date': timezone.now()
+            })
     else:
+        # Create form with initial values
         form = TransactionForm(initial={
             'portfolio': portfolio,
             'transaction_type': 'buy',
             'transaction_date': timezone.now()
         })
+        
+        # Direct assignment of assets queryset
+        form.fields['asset'].queryset = all_assets
+        
+        # Log the asset count
+        print(f"DEBUG: Asset count in buy_stock form: {form.fields['asset'].queryset.count()}")
     
     return render(request, 'portfolio/transaction_form.html', {
         'form': form,
         'title': 'Mua cổ phiếu',
-        'portfolio': portfolio
+        'portfolio': portfolio,
+        'portfolio_assets': portfolio.portfolioasset_set.all(),
+        'all_assets': all_assets
     })
 
 @login_required
 def sell_stock(request, portfolio_id):
+    # Check that the portfolio exists and belongs to the current user
     portfolio = get_object_or_404(Portfolio, pk=portfolio_id, user=request.user)
     
+    # Get owned assets for this portfolio with quantity > 0
+    portfolio_assets = PortfolioAsset.objects.filter(
+        portfolio=portfolio,
+        quantity__gt=0
+    ).select_related('asset')
+    
+    # Get assets that can be sold (having quantity > 0)
+    owned_assets = Asset.objects.filter(
+        id__in=portfolio_assets.values_list('asset_id', flat=True)
+    )
+    
+    # Debug info
+    print(f"DEBUG: Portfolio ID: {portfolio_id}, User: {request.user.username}")
+    print(f"DEBUG: Owned assets count: {owned_assets.count()}")
+    print(f"DEBUG: Portfolio assets count: {portfolio_assets.count()}")
+    
     if request.method == 'POST':
-        form = TransactionForm(request.POST)
-        if form.is_valid():
-            asset = form.cleaned_data['asset']
-            quantity = form.cleaned_data['quantity']
+        # Get symbol and convert to asset
+        symbol = request.POST.get('symbol')
+        
+        try:
+            # Find asset by symbol
+            asset = Asset.objects.get(symbol=symbol)
             
-            # Kiểm tra số lượng bán không vượt quá số lượng hiện có
-            portfolio_asset = PortfolioAsset.objects.filter(
-                portfolio=portfolio,
-                asset=asset
-            ).first()
+            # Build form data with the asset included
+            form_data = request.POST.copy()
+            form_data['asset'] = asset.id  # Set the asset ID in the form data
             
-            if not portfolio_asset or portfolio_asset.quantity < quantity:
-                messages.error(request, 'Số lượng bán vượt quá số lượng hiện có!')
-                return render(request, 'portfolio/transaction_form.html', {
-                    'form': form,
-                    'title': 'Bán cổ phiếu',
-                    'portfolio': portfolio
-                })
+            form = TransactionForm(form_data, initial={'portfolio': portfolio, 'transaction_type': 'sell'})
             
-            transaction = form.save(commit=False)
-            transaction.portfolio = portfolio
-            transaction.transaction_type = 'sell'
-            transaction.transaction_date = timezone.now()
-            transaction.save()
-            
-            messages.success(request, 'Giao dịch bán đã được thực hiện thành công!')
-            return redirect('portfolio_detail', pk=portfolio_id)
+            if form.is_valid():
+                quantity = form.cleaned_data['quantity']
+                
+                # Kiểm tra số lượng bán không vượt quá số lượng hiện có
+                portfolio_asset = portfolio_assets.filter(asset=asset).first()
+                
+                if not portfolio_asset or portfolio_asset.quantity < quantity:
+                    messages.error(request, 'Số lượng bán vượt quá số lượng hiện có!')
+                    # Reset the asset queryset to only owned assets
+                    form.fields['asset'].queryset = owned_assets
+                    return render(request, 'portfolio/transaction_form.html', {
+                        'form': form,
+                        'title': 'Bán cổ phiếu',
+                        'portfolio': portfolio,
+                        'portfolio_assets': portfolio_assets,
+                        'owned_assets': owned_assets
+                    })
+                
+                transaction = form.save(commit=False)
+                transaction.portfolio = portfolio
+                transaction.transaction_type = 'sell'
+                transaction.transaction_date = timezone.now()
+                transaction.save()
+                
+                messages.success(request, 'Giao dịch bán đã được thực hiện thành công!')
+                return redirect('portfolio_detail', pk=portfolio_id)
+            else:
+                # Debug form errors
+                print(f"DEBUG: Form errors: {form.errors}")
+                messages.error(request, f"Lỗi nhập dữ liệu: {form.errors}")
+                # Reset the asset queryset to only owned assets
+                form.fields['asset'].queryset = owned_assets
+        except Asset.DoesNotExist:
+            messages.error(request, f"Không tìm thấy cổ phiếu với mã {symbol}")
+            form = TransactionForm(initial={
+                'portfolio': portfolio,
+                'transaction_type': 'sell',
+                'transaction_date': timezone.now()
+            })
+            form.fields['asset'].queryset = owned_assets
     else:
+        # Create form with initial values
         form = TransactionForm(initial={
             'portfolio': portfolio,
             'transaction_type': 'sell',
             'transaction_date': timezone.now()
         })
+        
+        # Direct assignment of assets queryset
+        form.fields['asset'].queryset = owned_assets
+        
+        # Log the asset count
+        print(f"DEBUG: Owned asset count in sell_stock form: {owned_assets.count()}")
+        
+        # Debug owned assets
+        for asset in owned_assets:
+            try:
+                portfolio_asset = portfolio_assets.get(asset=asset)
+                print(f"  - {asset.symbol}: {portfolio_asset.quantity} shares at {portfolio_asset.average_price}")
+            except PortfolioAsset.DoesNotExist:
+                print(f"  - Error: No PortfolioAsset found for {asset.symbol}")
+        
+        # Add warning message if no assets are available
+        if not owned_assets.exists():
+            messages.warning(request, 'Không có cổ phiếu nào trong danh mục để bán. Hãy mua cổ phiếu trước.')
     
     return render(request, 'portfolio/transaction_form.html', {
         'form': form,
         'title': 'Bán cổ phiếu',
-        'portfolio': portfolio
+        'portfolio': portfolio,
+        'portfolio_assets': portfolio_assets,
+        'owned_assets': owned_assets
     })
 
 @login_required
@@ -302,24 +552,203 @@ def portfolio_transactions(request, portfolio_id):
         'transactions': transactions
     })
 
+# Auth0 related views - replaced with Django authentication
+def login_view(request):
+    """Sử dụng Auth0 để xác thực người dùng"""
+    from authlib.integrations.django_client import OAuth
+    from django.conf import settings
+    from urllib.parse import quote_plus, urlencode
+    
+    # Khởi tạo OAuth client
+    oauth = OAuth()
+    oauth.register(
+        "auth0",
+        client_id=settings.AUTH0_CLIENT_ID,
+        client_secret=settings.AUTH0_CLIENT_SECRET,
+        client_kwargs={
+            "scope": "openid profile email",
+        },
+        server_metadata_url=f"https://{settings.AUTH0_DOMAIN}/.well-known/openid-configuration",
+    )
+    
+    # Chuyển hướng đến trang đăng nhập Auth0
+    return oauth.auth0.authorize_redirect(
+        request, request.build_absolute_uri(reverse("callback"))
+    )
+
+def callback(request):
+    """Xử lý callback từ Auth0 và đăng nhập người dùng"""
+    from authlib.integrations.django_client import OAuth
+    from django.conf import settings
+    import json
+    from .utils import get_auth0_user_profile
+    
+    # Khởi tạo OAuth client
+    oauth = OAuth()
+    oauth.register(
+        "auth0",
+        client_id=settings.AUTH0_CLIENT_ID,
+        client_secret=settings.AUTH0_CLIENT_SECRET,
+        client_kwargs={
+            "scope": "openid profile email",
+        },
+        server_metadata_url=f"https://{settings.AUTH0_DOMAIN}/.well-known/openid-configuration",
+    )
+    
+    # Lấy token từ Auth0
+    token = oauth.auth0.authorize_access_token(request)
+    userinfo = token.get('userinfo')
+    
+    # Lấy thêm thông tin từ API Auth0 nếu được
+    access_token = token.get('access_token')
+    if access_token:
+        additional_info = get_auth0_user_profile(access_token)
+        if additional_info:
+            # Merge additional info vào userinfo
+            userinfo.update(additional_info)
+    
+    if userinfo:
+        # Lưu thông tin người dùng vào session
+        request.session['userinfo'] = userinfo
+        
+        # Kiểm tra xem người dùng đã tồn tại trong database chưa
+        auth0_user_id = userinfo.get('sub')
+        email = userinfo.get('email')
+        
+        try:
+            # Tìm user bằng auth0_user_id
+            user = User.objects.get(auth0_user_id=auth0_user_id)
+        except User.DoesNotExist:
+            try:
+                # Tìm user bằng email nếu không tìm thấy qua auth0_user_id
+                user = User.objects.get(email=email)
+                user.auth0_user_id = auth0_user_id
+                user.save()
+            except User.DoesNotExist:
+                # Tạo user mới nếu chưa tồn tại
+                user = User.objects.create_user(
+                    username=email.split('@')[0],
+                    email=email,
+                    auth0_user_id=auth0_user_id,
+                    first_name=userinfo.get('given_name', ''),
+                    last_name=userinfo.get('family_name', ''),
+                    profile_picture_url=userinfo.get('picture', '')
+                )
+                # Tự động tạo ví điện tử cho người dùng mới
+                from .models import Wallet
+                Wallet.objects.create(user=user)
+        
+        # Đăng nhập người dùng
+        login(request, user)
+        
+        # Cập nhật thông tin người dùng từ Auth0 profile
+        if 'picture' in userinfo and userinfo['picture']:
+            user.profile_picture_url = userinfo['picture']
+        if 'given_name' in userinfo and userinfo['given_name']:
+            user.first_name = userinfo['given_name']
+        if 'family_name' in userinfo and userinfo['family_name']:
+            user.last_name = userinfo['family_name']
+        for field in user._meta.fields:
+            value = getattr(user, field.name)
+            if isinstance(value, str) and len(value) > 200:
+                print(f"Field {field.name} quá dài: {len(value)} ký tự")
+
+        user.save()
+
+        
+        return redirect('dashboard')
+    
+    return redirect('home')
+
+def logout_view(request):
+    """Đăng xuất khỏi Django và Auth0"""
+    from django.conf import settings
+    from urllib.parse import quote_plus, urlencode
+    
+    # Đăng xuất khỏi Django
+    logout(request)
+    
+    # Xóa session
+    request.session.clear()
+    
+    # Chuyển hướng đến trang đăng xuất của Auth0
+    return redirect(
+        f"https://{settings.AUTH0_DOMAIN}/v2/logout?"
+        + urlencode(
+            {
+                "returnTo": request.build_absolute_uri(reverse("home")),
+                "client_id": settings.AUTH0_CLIENT_ID,
+            },
+            quote_via=quote_plus,
+        )
+    )
+
 def register(request):
+    """Chuyển hướng đến trang đăng ký của Auth0"""
+    # Sử dụng cùng hàm login_view để chuyển hướng đến Auth0
+    return login_view(request)
+
+# User profile view
+@login_required
+def user_profile(request):
+    user = request.user
+    
     if request.method == 'POST':
-        form = UserRegistrationForm(request.POST)
+        form = UserProfileForm(request.POST, request.FILES, instance=user)
         if form.is_valid():
-            user = form.save()
-            login(request, user)
-            messages.success(request, 'Đăng ký thành công!')
-            return redirect('dashboard')
+            user_data = form.save(commit=False)
+            
+            # Check if a new profile picture was uploaded
+            if 'profile_picture' in request.FILES and request.FILES['profile_picture']:
+                # If user uploads a local picture, prioritize it over the Auth0 URL
+                user_data.profile_picture = request.FILES['profile_picture']
+                # Clear Auth0 profile picture URL to use the uploaded one
+                user_data.profile_picture_url = None
+            
+            user_data.save()
+            messages.success(request, 'Thông tin cá nhân đã được cập nhật thành công!')
+            return redirect('user_profile')
     else:
-        form = UserRegistrationForm()
-    return render(request, 'portfolio/register.html', {'form': form})
+        form = UserProfileForm(instance=user)
+    
+    # Get Auth0 user info from session
+    auth0_userinfo = request.session.get('userinfo', {})
+    
+    return render(request, 'portfolio/user_profile.html', {
+        'form': form,
+        'auth0_userinfo': auth0_userinfo
+    })
 
 # ============ MARKET =======
 @login_required
 def market(request):
-    price_board = get_price_board()
+    # Get price board data or use fallback data if there's an error
+    try:
+        price_board = get_price_board()
+        price_board_json = price_board.to_json(orient='split')
+        print("Successfully fetched price board data")
+    except Exception as e:
+        print(f"Error in market view: {str(e)}")
+        # Simple fallback data with explicit index structure
+        fallback_data = {
+            "index": [0, 1, 2, 3, 4],
+            "columns": ["symbol", "ceiling", "floor", "ref_price", "match_price", "match_vol"],
+            "data": [
+                ["AAA", 25000, 20000, 22000, 22500, 10000],
+                ["VNM", 60000, 50000, 55000, 56000, 5000],
+                ["FPT", 90000, 80000, 85000, 86000, 3000],
+                ["VIC", 45000, 35000, 40000, 41000, 2000],
+                ["MSN", 70000, 60000, 65000, 66000, 4000]
+            ]
+        }
+        price_board_json = json.dumps(fallback_data)
+        messages.warning(request, "Không thể tải dữ liệu thị trường thực. Hiển thị dữ liệu mẫu.")
+    
+    # Log data for debugging
+    print(f"Data structure sent to template: {price_board_json[:100]}...")
+    
     context = {
-        "price_board_json": price_board.to_json(orient='split'),
+        "price_board_json": price_board_json,
     }
     return render(request, 'portfolio/market.html', context)
 
@@ -374,6 +803,11 @@ def ai_chat_api(request):
         # Gọi API AI để nhận phản hồi
         response = get_ai_response(message)
         
+        # Đơn giản hóa định dạng phản hồi và loại bỏ ký tự formatting
+        response = response.strip()
+        # Loại bỏ các ký tự đánh dấu in đậm và in nghiêng
+        response = response.replace('**', '').replace('*', '')
+        
         return JsonResponse({
             'success': True,
             'response': response
@@ -386,6 +820,134 @@ def ai_chat_api(request):
         }, status=400)
     
     except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+# Debug view to directly test asset retrieval 
+@login_required
+def debug_assets(request):
+    """Debug view to directly test asset retrieval"""
+    # Get all assets
+    all_assets = Asset.objects.all()
+    
+    # Create a simple context
+    context = {
+        'assets': all_assets,
+        'assets_count': all_assets.count(),
+        'portfolios': Portfolio.objects.filter(user=request.user),
+    }
+    
+    # Log to console
+    print(f"DEBUG: Found {all_assets.count()} assets in database")
+    for asset in all_assets:
+        print(f"  - Asset: {asset.id} | {asset.symbol} | {asset.name}")
+    
+    return render(request, 'portfolio/debug_assets.html', context)
+
+@login_required
+def sync_assets(request):
+    """View to synchronize assets from VNStock to the database"""
+    if request.method == 'POST' or request.method == 'GET':  # Allow both GET and POST
+        try:
+            result = sync_vnstock_to_assets()
+            
+            if isinstance(result, dict):
+                messages.success(
+                    request, 
+                    f"Đồng bộ thành công! Đã thêm {result['created']} cổ phiếu mới, cập nhật {result['updated']} cổ phiếu. Bây giờ bạn có thể mua/bán những cổ phiếu này."
+                )
+            else:
+                messages.error(request, "Đồng bộ không thành công, không có cổ phiếu nào được thêm.")
+        except Exception as e:
+            messages.error(request, f"Lỗi khi đồng bộ dữ liệu: {str(e)}")
+    
+    # Check if the request came from the market page
+    referer = request.META.get('HTTP_REFERER', '')
+    if 'market' in referer:
+        return redirect('market')
+    else:
+        return redirect('debug_assets')
+
+@login_required
+def update_stock_prices(request):
+    """View to update current stock prices"""
+    if request.method == 'POST':
+        try:
+            # Call the function to fetch and update prices
+            snapshot_df = fetch_stock_prices_snapshot()
+            
+            if snapshot_df is not None:
+                # Count non-null prices
+                non_null_prices = sum(1 for col in snapshot_df.columns if col != 'time' and snapshot_df[col].iloc[0] is not None)
+                messages.success(
+                    request, 
+                    f"Cập nhật giá thành công! Đã cập nhật giá cho {non_null_prices} cổ phiếu."
+                )
+            else:
+                messages.error(request, "Không thể cập nhật giá cổ phiếu.")
+        except Exception as e:
+            messages.error(request, f"Lỗi khi cập nhật giá: {str(e)}")
+    
+    return redirect('debug_assets')
+
+@login_required
+def get_stock_symbols(request):
+    """API view để lấy danh sách mã cổ phiếu phù hợp với từ khóa tìm kiếm"""
+    term = request.GET.get('term', '')
+    
+    # Tìm kiếm cổ phiếu phù hợp với từ khóa
+    assets = Asset.objects.filter(symbol__istartswith=term)[:10]  # Giới hạn 10 kết quả
+    
+    # Trả về danh sách các mã cổ phiếu
+    symbols = [asset.symbol for asset in assets]
+    
+    return JsonResponse(symbols, safe=False)
+
+@login_required
+def get_stock_price(request, symbol):
+    """
+    API endpoint để lấy giá cổ phiếu hiện tại và giá gợi ý mua/bán.
+    """
+    try:
+        import random
+
+        # Tìm cổ phiếu trong cơ sở dữ liệu
+        asset = Asset.objects.filter(symbol=symbol).first()
+        if asset:
+            # Lấy giá từ cơ sở dữ liệu
+            match_price = float(asset.current_price)
+            
+            # Tạo giá trị giả lập cho biến động giá
+            change_percent = random.uniform(-2, 2)
+            
+            # Tính giá mua/bán: giá mua thấp hơn 0.5%, giá bán cao hơn 0.5%
+            buy_price = round(match_price * 0.995)
+            sell_price = round(match_price * 1.005)
+            
+            # Chuẩn bị dữ liệu phản hồi
+            response_data = {
+                'success': True,
+                'symbol': symbol,
+                'price': match_price,
+                'change_percent': change_percent,
+                'buy_price': buy_price,
+                'sell_price': sell_price,
+                'source': 'database'
+            }
+            
+            # Trả về phản hồi JSON
+            return JsonResponse(response_data)
+        else:
+            # Không tìm thấy cổ phiếu trong cơ sở dữ liệu
+            return JsonResponse({
+                'success': False,
+                'error': f'Không tìm thấy mã cổ phiếu {symbol}'
+            }, status=404)
+    except Exception as e:
+        # Xử lý lỗi
+        print(f"ERROR in get_stock_price: {e}")
         return JsonResponse({
             'success': False,
             'error': str(e)
